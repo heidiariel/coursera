@@ -1,0 +1,285 @@
+---
+title: "NYPD Shooting Incident data analysis"
+author: "Yujung Teng"
+date: "2021/7/29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Hi There. I'm going to show you my analysis process and results of NYPD Shooting Incident.
+
+First at all. English is not my Mother tongue. I want to declare that I have no malice against any race, gender, or country. If there is any wrong expression in English, please forgive me.
+
+
+## 1. read library and data
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(zoo)
+library(rpart)
+```
+
+Download data by url will be easy to Reproduce, from https://catalog.data.gov/dataset and searching for
+‘NYPD Shooting Incident Data (Historic)’.
+
+```{r message=FALSE, warning=FALSE}
+url_in = "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+NYPD_data = read_csv(url_in)
+```
+
+## 2. Tidy & have a look with data
+
+Do the summary and We can see the OCCUR_DATE & OCCUR_TIME are not in the right type
+
+So let's Change them to date & time types respectively
+```{r}
+NYPD_data = NYPD_data%>%
+    mutate(OCCUR_DATE=mdy(OCCUR_DATE))
+
+NYPD_data = NYPD_data%>%
+    mutate(OCCUR_TIME=hms(OCCUR_TIME))
+```
+
+
+Now there are in correct type. And we can get the data date range is 2006-01-01 to 2020-12-31
+```{r}
+summary(NYPD_data)
+```
+
+
+Let's see how many incident occurred in each borough.
+```{r}
+NYPD_data %>% group_by(BORO) %>% summarise(COUNT=n()) %>% arrange(desc(COUNT))
+```
+As we all know, different borough have different population.
+Some borough has more incidents just because it has larger population.
+To avoid this bias, I'm going to download the population data of New-York
+
+## 3. Find additional data. Transform and Merge
+
+That I found is the population data of New-York from NYC open data, which is a Official website. We can believe the data from it will be correct.
+
+Again, download data from url for easily reproduce.
+
+```{r}
+url_in ="https://data.cityofnewyork.us/api/views/xywu-7bv9/rows.csv?accessType=DOWNLOAD"
+NY_POPULATION = read_csv(url_in)
+```
+
+We can see each borough's population in decade in summary.
+```{r}
+summary(NY_POPULATION)
+```
+
+The Borough columns have all the Borough in New-York. And have we can also get the NYC Total.
+```{r}
+NY_POPULATION$Borough 
+```
+
+
+
+Now I am going to merge these two data set.
+
+Since Our incident data which date range is 2006-01-01 to 2020-12-31. We only need population in 2000~2020.
+
+I transformed the population data which columns = (Borough , year of decade, population).
+And I transformed a new data frame for NYC Total.
+```{r}
+NY_POPULATION_DECADE = NY_POPULATION%>% 
+  select('Borough','2000','2010','2020')%>% 
+  mutate(Borough = toupper(Borough))%>% 
+  gather(YEAR_DECADE,POPULATION, `2000`:`2020`)%>% 
+  rename("BORO"="Borough")%>% 
+  mutate(YEAR_DECADE = as.integer(YEAR_DECADE))
+
+NY_POPULATION_TOTAL = NY_POPULATION_DECADE %>% 
+  filter(BORO=="NYC TOTAL") %>% 
+  rename("ALL_NY_POPULATION"="POPULATION")%>%
+  select(-(BORO))
+```
+
+
+For the incidence data,What I am interesting is when the incident occur.
+
+So I Select the date & time columns, and create some new columns like year,month,day,hour.
+```{r}
+NYPD_TIME_BORO = NYPD_data %>% select(OCCUR_DATE,OCCUR_TIME,BORO,STATISTICAL_MURDER_FLAG)
+NYPD_TIME_BORO = NYPD_TIME_BORO%>%
+    mutate(OCCUR_YEAR = year(OCCUR_DATE),
+          #YEAR_DECADE = round_any(OCCUR_YEAR, 10, f = ceiling),
+           YEAR_DECADE = as.integer(paste(substr(as.character(OCCUR_YEAR),0,3),'0',sep='')),
+           OCCUR_MONTH = month(OCCUR_DATE),
+           OCCUR_DAY = day(OCCUR_DATE),
+           OCCUR_WDAY = wday(OCCUR_DATE),
+           OCCUR_YEARMON =as.yearmon(OCCUR_DATE),
+           OCCUR_HOUR = hour(OCCUR_TIME)   
+)
+```
+
+
+Merge incident and population data.
+```{r}
+NYPD_TIME_BORO = left_join(NYPD_TIME_BORO, NY_POPULATION_DECADE
+                           , by = c("BORO" = "BORO", "YEAR_DECADE" = "YEAR_DECADE"))
+
+NYPD_TIME_BORO = left_join(NYPD_TIME_BORO, NY_POPULATION_TOTAL
+                           , by = c("YEAR_DECADE" = "YEAR_DECADE"))
+```
+
+
+Make sure there is no NA in the data.
+```{r}
+colSums(is.na(NYPD_TIME_BORO))
+```
+Now we can start to analysis.
+
+
+## 4. Analysation & Visualization
+
+First,let's look the Shooting crime rate for each year
+
+Shooting crime rate = 1000 * Year_COUNT/POPULATION
+
+We can see the Shooting crime rate is getting down but have a great increase in 2020
+```{r,fig.width=6, fig.height=2}
+NYPD_YEAR_COUNT = NYPD_TIME_BORO %>% 
+  group_by(OCCUR_YEAR) %>% 
+  summarise(COUNT=n(),ALL_NY_POPULATION=max(ALL_NY_POPULATION)) %>% 
+  mutate(rate_shoot = 1000 * COUNT/ALL_NY_POPULATION) %>% 
+  arrange(OCCUR_YEAR)
+
+ggplot(NYPD_YEAR_COUNT
+       ,aes(x=OCCUR_YEAR,y=rate_shoot))+geom_point()+geom_line()
+```
+
+let's see with smaller period, group by YEARMONTH.
+
+Interesting, it has periodic fluctuations, like monthly change
+```{r,fig.width=6, fig.height=2}
+NYPD_YM_COUNT = NYPD_TIME_BORO %>% 
+  group_by(OCCUR_YEARMON) %>% 
+  summarise(COUNT=n(),ALL_NY_POPULATION=max(POPULATION)) %>% 
+  mutate(rate_shoot = 1000 * COUNT/ALL_NY_POPULATION) %>% 
+  arrange(OCCUR_YEARMON)
+
+ggplot(NYPD_YM_COUNT
+       ,aes(x=OCCUR_YEARMON,y=rate_shoot))+geom_point()+geom_line()
+```
+
+let's see all the data group by month.
+
+Obviously the peak around July and August,And the valley around February
+
+```{r,fig.width=6, fig.height=2}
+NYPD_YEAR_COUNT = NYPD_TIME_BORO %>% 
+  group_by(OCCUR_MONTH) %>% 
+  summarise(COUNT=n(),ALL_NY_POPULATION=max(ALL_NY_POPULATION)) %>% 
+  mutate(rate_shoot = 1000 * COUNT/ALL_NY_POPULATION) %>% 
+  arrange(OCCUR_MONTH)
+
+ggplot(NYPD_YEAR_COUNT
+       ,aes(x=OCCUR_MONTH,y=rate_shoot))+geom_point()+geom_line()+ scale_x_continuous(breaks = seq(1, 12, by = 1))
+```
+
+
+let's see the each borough if they have the same periodic fluctuations
+
+The answer is yes.
+
+```{r warning=FALSE}
+NYPD_MONTH_BORO_COUNT = NYPD_TIME_BORO %>% 
+  group_by(OCCUR_MONTH,BORO) %>% 
+  summarise(COUNT=n(),POPULATION=max(POPULATION), .groups = 'drop') %>% 
+  mutate(rate_shoot = 1000 * COUNT/POPULATION) %>% 
+  arrange(OCCUR_MONTH)
+
+
+ggplot(NYPD_MONTH_BORO_COUNT
+       ,aes(x=OCCUR_MONTH,y=rate_shoot)
+       )+geom_point()+geom_line()+facet_wrap(~BORO)+ scale_x_continuous(breaks = seq(1, 12, by = 1))
+```
+
+And I also print the incidence data group by hours and weekday.
+
+By hours,We can see most of incidence occurred at afternoon and night.
+```{r}
+NYPD_HOUR_BORO_COUNT = NYPD_TIME_BORO %>% 
+  group_by(OCCUR_HOUR,BORO) %>% 
+  summarise(COUNT=n(),POPULATION=max(POPULATION), .groups = 'drop') %>% 
+  mutate(rate_shoot = 1000 * COUNT/POPULATION) %>% 
+  arrange(OCCUR_HOUR)
+
+
+ggplot(NYPD_HOUR_BORO_COUNT
+       ,aes(x=OCCUR_HOUR,y=rate_shoot)
+       )+geom_point()+geom_line()+facet_wrap(~BORO)+ scale_x_continuous(breaks = seq(0, 23, by = 2))
+
+```
+
+By Weekday We can see most of incidence occurred in Saturday & Sunday (1 = Sunday ,7 = Saturday)
+```{r}
+NYPD_WDAY_BORO_COUNT = NYPD_TIME_BORO %>% 
+  group_by(OCCUR_WDAY,BORO) %>% 
+  summarise(COUNT=n(),POPULATION=max(POPULATION), .groups = 'drop') %>% 
+  mutate(rate_shoot = 1000 * COUNT/POPULATION) %>% 
+  arrange(OCCUR_WDAY)
+
+
+ggplot(NYPD_WDAY_BORO_COUNT
+       ,aes(x=OCCUR_WDAY,y=rate_shoot)
+       )+geom_point()+geom_line()+facet_wrap(~BORO)+ scale_x_continuous(breaks = seq(1, 7, by = 1))
+```
+
+## 5. Modeling
+
+Let's try to make a model for the data group by hour and each borough 
+```{r}
+NYPD_HOUR_BORO_rate = NYPD_TIME_BORO %>% 
+  group_by(OCCUR_HOUR,BORO) %>% 
+  summarise(COUNT=n(),
+            POPULATION=max(POPULATION),
+            death= sum(STATISTICAL_MURDER_FLAG),
+            .groups = 'drop') %>% 
+  mutate(rate_shoot = 1000 * COUNT/POPULATION,
+         rate_death = death/COUNT,
+         ) %>% 
+  arrange(OCCUR_HOUR)
+
+```
+
+I used CART for modeling, and print the Tree
+```{r,fig.width=7, fig.height=7}
+mod = rpart(rate_shoot ~ OCCUR_HOUR , data=NYPD_HOUR_BORO_rate)
+plot(mod)
+text(mod , cex =.7)
+```
+
+let's do the prediction.
+
+We can see the Result is match
+```{r}
+NYPD_HOUR_BORO_rate = NYPD_HOUR_BORO_rate%>%
+  mutate(pred= predict(mod,NYPD_HOUR_BORO_rate %>% select(OCCUR_HOUR)))
+
+
+NYPD_HOUR_BORO_rate%>% 
+  ggplot()+
+  geom_point(aes(x = OCCUR_HOUR, y= rate_shoot),color = "blue")+
+  geom_line(aes(x = OCCUR_HOUR, y= pred),color = "red")
+```
+
+
+## Conclusion
+There must be a clear relationship between the date and time of the shooting. This is an area where further investigation into the circumstances and factors that led to these incidents may be required.
+
+## Bias
+1. Maybe shooting incidents occur at dawn is rarely reported
+2. Maybe people will be avaliable to call the police at the weekends but not in working day.
+
+Thank you ! 
